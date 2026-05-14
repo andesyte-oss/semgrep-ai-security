@@ -1,0 +1,11 @@
+# Top-level umbrella that pulls in every rule pack. Consumers point Semgrep
+# at this single URL and get the full LLM Top 10 coverage. Each pack is also
+# usable standalone (e.g. `--config rules/prompt-injection.yml`) for teams
+# that want narrower scope or different severity policies per pack.
+include:
+  - rules/prompt-injection.yml
+  - rules/insecure-output-handling.yml
+  - rules/model-dos.yml
+  - rules/sensitive-info-disclosure.yml
+  - rules/insecure-plugin-design.yml
+  - rules/excessive-agency.yml

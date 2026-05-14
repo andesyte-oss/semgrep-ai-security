@@ -1,0 +1,74 @@
+# LLM07 — Insecure Plugin / Tool Design
+#
+# When you expose a tool to an LLM, it's effectively a user-controlled API
+# endpoint with no authn. These rules flag tool implementations that are
+# unsafe by themselves *regardless* of what the LLM does.
+
+rules:
+  - id: ai.insecure-plugin.tool-runs-shell-py
+    message: >-
+      LLM tool implementation runs a shell command via `subprocess(..., shell=True)`
+      or `os.system`. The tool argument is, by construction, attacker-controlled
+      (any prompt injection can call this tool with any string). Refuse the tool
+      entirely, switch to an allowlisted operation, or use argv form with a
+      strict argument schema.
+    severity: ERROR
+    languages: [python]
+    metadata:
+      cwe: "CWE-78: OS Command Injection"
+      owasp: "LLM07:2026 Insecure Plugin Design"
+      impact: HIGH
+    patterns:
+      - pattern-either:
+          - pattern: |
+              @tool
+              def $NAME(...):
+                  ...
+                  subprocess.run(..., shell=True, ...)
+                  ...
+          - pattern: |
+              @tool
+              def $NAME(...):
+                  ...
+                  os.system(...)
+                  ...
+          - pattern: |
+              @tool($...ARGS)
+              def $NAME(...):
+                  ...
+                  subprocess.run(..., shell=True, ...)
+                  ...
+
+  - id: ai.insecure-plugin.tool-fetches-arbitrary-url-py
+    message: >-
+      LLM tool implementation performs a network request to a URL derived
+      from its arguments without any allowlist check. This is SSRF — an
+      attacker can pivot from prompt injection to internal-network access
+      (cloud metadata endpoints, internal admin APIs, etc.). Enforce an
+      allowlist of host patterns before the request leaves the function.
+    severity: ERROR
+    languages: [python]
+    metadata:
+      cwe: "CWE-918: Server-Side Request Forgery (SSRF)"
+      owasp: "LLM07:2026 Insecure Plugin Design"
+      impact: HIGH
+    patterns:
+      - pattern-either:
+          - pattern: |
+              @tool
+              def $NAME($URL, ...):
+                  ...
+                  requests.get($URL, ...)
+                  ...
+          - pattern: |
+              @tool
+              def $NAME($URL, ...):
+                  ...
+                  httpx.$M($URL, ...)
+                  ...
+          - pattern: |
+              @tool
+              def $NAME($URL, ...):
+                  ...
+                  urllib.request.urlopen($URL, ...)
+                  ...

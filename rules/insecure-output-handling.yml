@@ -1,0 +1,99 @@
+# LLM02 — Insecure Output Handling
+#
+# LLM output is *untrusted text from a remote server* and must be treated
+# as such. The same model output that renders fine in your dashboard
+# becomes XSS when piped into innerHTML, RCE when piped into eval, and
+# SSRF when fed into a URL builder. These rules catch the most common
+# pipelines.
+
+rules:
+  - id: ai.insecure-output-handling.eval-llm-response-py
+    message: >-
+      LLM response is passed to `eval` / `exec` / `compile`. This is
+      remote code execution by any reasonable threat model — the model
+      will happily emit attacker-controlled code if the input prompt is
+      compromised. Use a sandboxed code interpreter or restrict to a
+      structured-output schema (e.g. tool calls / JSON Schema).
+    severity: ERROR
+    languages: [python]
+    metadata:
+      cwe: "CWE-94: Improper Control of Generation of Code"
+      owasp: "LLM02:2026 Insecure Output Handling"
+      impact: HIGH
+    pattern-either:
+      - pattern: |
+          eval($CLIENT.chat.completions.create(...).choices[0].message.content)
+      - pattern: |
+          exec($CLIENT.chat.completions.create(...).choices[0].message.content)
+      - pattern: |
+          eval($CLIENT.messages.create(...).content[0].text)
+      - pattern: |
+          $RESP = $CLIENT.chat.completions.create(...)
+          ...
+          eval($RESP.choices[0].message.content)
+      - pattern: |
+          $RESP = $CLIENT.chat.completions.create(...)
+          ...
+          exec($RESP.choices[0].message.content)
+
+  - id: ai.insecure-output-handling.innerhtml-llm-response-ts
+    message: >-
+      LLM-generated text is assigned directly to `innerHTML` /
+      `dangerouslySetInnerHTML`. Even if your prompt instructs the model
+      to return plain text, an attacker can manipulate the response via
+      prompt injection. Render via `textContent` / a JSX text child, or
+      sanitise with DOMPurify before injection.
+    severity: ERROR
+    languages: [typescript, javascript]
+    metadata:
+      cwe: "CWE-79: Cross-site Scripting"
+      owasp: "LLM02:2026 Insecure Output Handling"
+      impact: HIGH
+    pattern-either:
+      - pattern: $EL.innerHTML = $TEXT.choices[0].message.content
+      - pattern: $EL.innerHTML = $TEXT.content[0].text
+      - patterns:
+          - pattern: |
+              <$TAG dangerouslySetInnerHTML={{ __html: $EXPR }} />
+          - metavariable-pattern:
+              metavariable: $EXPR
+              patterns:
+                - pattern-either:
+                    - pattern: $X.completions.create(...).choices[0].message.content
+                    - pattern: $X.messages.create(...).content[0].text
+                    - pattern: generateText(...).text
+                    - pattern: $X.text
+                    - pattern: $X.message.content
+
+  - id: ai.insecure-output-handling.shell-exec-llm-response
+    message: >-
+      LLM response is passed to a shell-exec primitive
+      (`subprocess.run(..., shell=True)`, `os.system`, `child_process.exec`).
+      A successful prompt-injection here is full remote shell access on
+      whatever host runs this code. Replace with an exec form that takes
+      an argv array, or refuse non-allowlisted commands.
+    severity: ERROR
+    languages: [python, typescript, javascript]
+    metadata:
+      cwe: "CWE-78: OS Command Injection"
+      owasp: "LLM02:2026 Insecure Output Handling"
+      impact: HIGH
+    pattern-either:
+      - pattern: |
+          subprocess.run($CMD, shell=True, ...)
+      - pattern: |
+          os.system($CMD)
+      - pattern: |
+          exec($CMD)
+      - patterns:
+          - pattern-either:
+              - pattern: subprocess.run($CMD, ...)
+              - pattern: child_process.exec($CMD, ...)
+              - pattern: exec($CMD)
+          - metavariable-pattern:
+              metavariable: $CMD
+              patterns:
+                - pattern-either:
+                    - pattern: $X.choices[0].message.content
+                    - pattern: $X.content[0].text
+                    - pattern: $X.message.content

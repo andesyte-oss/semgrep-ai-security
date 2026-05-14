@@ -1,0 +1,47 @@
+# LLM06 — Sensitive Information Disclosure
+#
+# Two failure modes: (a) secrets / PII embedded in the system prompt or
+# tool definitions, where they leak as soon as the prompt is recoverable
+# via prompt injection; (b) logging the full LLM request including the
+# system prompt, where the secret leaks through observability.
+
+rules:
+  - id: ai.sensitive-info.hardcoded-secret-in-system-prompt-py
+    message: >-
+      What looks like a long random token / API key is embedded directly
+      in a system prompt string. Anything in the system prompt is
+      recoverable via prompt injection — never put secrets there. Inject
+      them via tool calls or fetch them server-side from the request
+      context.
+    severity: ERROR
+    languages: [python]
+    metadata:
+      cwe: "CWE-798: Use of Hard-coded Credentials"
+      owasp: "LLM06:2026 Sensitive Information Disclosure"
+      impact: HIGH
+    patterns:
+      - pattern: |
+          {"role": "system", "content": $S}
+      - metavariable-regex:
+          metavariable: $S
+          regex: '(?s)"[^"]*(sk_live_|sk-[A-Za-z0-9]{20,}|ghp_[A-Za-z0-9]{30,}|AKIA[0-9A-Z]{16}|AIza[0-9A-Za-z\-_]{30,})[^"]*"'
+
+  - id: ai.sensitive-info.log-full-llm-request-py
+    message: >-
+      The entire `messages=` payload is being logged. If the system
+      prompt contains anything secret (API keys, internal URLs, customer
+      identifiers), they're now in your log aggregator. Redact secrets
+      from the system prompt or scrub before logging.
+    severity: WARNING
+    languages: [python]
+    metadata:
+      cwe: "CWE-532: Insertion of Sensitive Information into Log File"
+      owasp: "LLM06:2026 Sensitive Information Disclosure"
+      impact: MEDIUM
+    pattern-either:
+      - pattern: |
+          logging.$LEVEL(..., messages=$MSGS, ...)
+      - pattern: |
+          logger.$LEVEL(..., $MSGS, ...)
+      - pattern: |
+          print(f"...{$MSGS}...")

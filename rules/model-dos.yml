@@ -1,0 +1,61 @@
+# LLM04 — Model Denial of Service
+#
+# Naive LLM integrations can be DoS'd cheaply by sending huge inputs,
+# unbounded completion lengths, or by exploiting agent loops with no
+# step ceiling. These rules flag the most common shapes.
+
+rules:
+  - id: ai.model-dos.no-max-tokens-openai-py
+    message: >-
+      OpenAI completion call has no `max_tokens` (or `max_completion_tokens`)
+      cap. Without one, a maliciously-crafted prompt can drive the response
+      to the model's context limit and burn API spend at attacker pace. Set
+      an explicit cap appropriate to the use case (typically 1024–4096).
+    severity: WARNING
+    languages: [python]
+    metadata:
+      cwe: "CWE-770: Allocation of Resources Without Limits or Throttling"
+      owasp: "LLM04:2026 Model Denial of Service"
+      impact: MEDIUM
+    patterns:
+      - pattern: $CLIENT.chat.completions.create(...)
+      - pattern-not: $CLIENT.chat.completions.create(..., max_tokens=..., ...)
+      - pattern-not: $CLIENT.chat.completions.create(..., max_completion_tokens=..., ...)
+
+  - id: ai.model-dos.no-max-tokens-anthropic-py
+    message: >-
+      Anthropic messages call has no `max_tokens` cap. `max_tokens` is
+      technically required by the API but the SDK accepts None and the
+      server's default is very high — attackers can drive cost per
+      request to multiple dollars trivially. Always set an explicit cap.
+    severity: WARNING
+    languages: [python]
+    metadata:
+      cwe: "CWE-770: Allocation of Resources Without Limits or Throttling"
+      owasp: "LLM04:2026 Model Denial of Service"
+      impact: MEDIUM
+    patterns:
+      - pattern: $CLIENT.messages.create(...)
+      - pattern-not: $CLIENT.messages.create(..., max_tokens=..., ...)
+
+  - id: ai.model-dos.unbounded-agent-loop-langchain
+    message: >-
+      LangChain AgentExecutor is constructed without `max_iterations` /
+      `max_execution_time`. A malicious tool result can cause the agent
+      to loop indefinitely (each iteration ≈ one LLM round-trip = ~$0.01).
+      Set `max_iterations=10` and `max_execution_time=60` by default,
+      tuned upward only when the workload requires it.
+    severity: WARNING
+    languages: [python]
+    metadata:
+      cwe: "CWE-835: Loop with Unreachable Exit Condition"
+      owasp: "LLM04:2026 Model Denial of Service"
+      impact: MEDIUM
+    patterns:
+      - pattern-either:
+          - pattern: AgentExecutor(...)
+          - pattern: AgentExecutor.from_agent_and_tools(...)
+      - pattern-not: |
+          AgentExecutor(..., max_iterations=..., ...)
+      - pattern-not: |
+          AgentExecutor.from_agent_and_tools(..., max_iterations=..., ...)

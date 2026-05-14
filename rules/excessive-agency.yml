@@ -1,0 +1,67 @@
+# LLM08 — Excessive Agency
+#
+# Agentic systems get into trouble when the LLM has direct access to
+# irreversible side effects (sending emails, writing to prod DBs,
+# transferring funds) without a confirm-step. These rules flag the most
+# common patterns.
+
+rules:
+  - id: ai.excessive-agency.tool-deletes-without-confirmation-py
+    message: >-
+      LLM-callable tool performs a delete / destroy operation with no
+      explicit `confirm` argument the model must surface to the user.
+      Prompt-injection turns this into a one-click data-loss vector.
+      Require an explicit confirmation token, or route through a
+      human-in-the-loop approval step before executing the destructive
+      call.
+    severity: WARNING
+    languages: [python]
+    metadata:
+      cwe: "CWE-863: Incorrect Authorization"
+      owasp: "LLM08:2026 Excessive Agency"
+      impact: HIGH
+    patterns:
+      - pattern-either:
+          - pattern: |
+              @tool
+              def $NAME(...):
+                  ...
+                  $X.delete(...)
+                  ...
+          - pattern: |
+              @tool
+              def $NAME(...):
+                  ...
+                  $X.drop_table(...)
+                  ...
+          - pattern: |
+              @tool
+              def $NAME(...):
+                  ...
+                  $X.execute("DELETE FROM ...")
+                  ...
+      - metavariable-regex:
+          metavariable: $NAME
+          regex: "^(delete|destroy|drop|wipe|purge|remove)_.*"
+
+  - id: ai.excessive-agency.tool-broad-shell-py
+    message: >-
+      An LLM tool named like a generic shell ("execute_command",
+      "run_shell", "bash", "sh") is exposed without an allowlist. This
+      gives the model arbitrary shell access. Replace with narrow,
+      verb-specific tools (e.g. `list_files`, `read_file`) and refuse
+      wildcard shell access entirely.
+    severity: ERROR
+    languages: [python]
+    metadata:
+      cwe: "CWE-77: Improper Neutralization of Special Elements used in a Command"
+      owasp: "LLM08:2026 Excessive Agency"
+      impact: HIGH
+    patterns:
+      - pattern: |
+          @tool
+          def $NAME(...):
+              ...
+      - metavariable-regex:
+          metavariable: $NAME
+          regex: "^(execute_command|run_shell|run_bash|shell|bash|sh|run|exec)$"

@@ -1,0 +1,90 @@
+# LLM01 — Prompt Injection
+#
+# Rules in this pack flag *sinks* that splice untrusted user input directly
+# into an LLM prompt. We focus on the construction site (where the prompt
+# is built) rather than the call site (where it's sent), because that's the
+# point at which sanitisation should happen.
+#
+# False-positive policy: only flag when the value spliced into the prompt
+# is *unambiguously* untrusted (req.body, request.json(), event.body, etc.)
+# AND the splice is inline. Variables that pass through any normalisation
+# helper are out of scope here — taint mode would handle that and we save
+# it for v2.
+
+rules:
+  - id: ai.prompt-injection.openai-python-fstring-user-input
+    message: >-
+      User-controlled input is interpolated directly into an OpenAI chat
+      prompt via f-string. An attacker can override the system prompt or
+      exfiltrate tool credentials by injecting role markers. Wrap untrusted
+      content in a delimiter (e.g. XML tags) and instruct the model to
+      treat it as data, or escape with a dedicated prompt sanitiser.
+    severity: WARNING
+    languages: [python]
+    metadata:
+      cwe: "CWE-77: Improper Neutralization of Special Elements used in a Command"
+      owasp: "LLM01:2026 Prompt Injection"
+      impact: HIGH
+      references:
+        - https://genai.owasp.org/llmrisk/llm01-prompt-injection/
+    patterns:
+      - pattern-either:
+          - pattern: |
+              $CLIENT.chat.completions.create(..., messages=[..., {"role": ..., "content": f"...{$REQ.$F(...)}..."}, ...], ...)
+          - pattern: |
+              $CLIENT.chat.completions.create(..., messages=[..., {"role": ..., "content": f"...{$REQ.$F}..."}, ...], ...)
+          - pattern: |
+              $CLIENT.messages.create(..., messages=[..., {"role": ..., "content": f"...{$REQ.$F(...)}..."}, ...], ...)
+      - metavariable-regex:
+          metavariable: $REQ
+          regex: "^(request|req|event|body|payload)$"
+
+  - id: ai.prompt-injection.langchain-string-prompt
+    message: >-
+      A LangChain prompt is constructed with raw string concatenation /
+      f-string interpolation of untrusted input. Use PromptTemplate /
+      ChatPromptTemplate with named variables — those route untrusted text
+      through LangChain's parameter binding, which (a) prevents accidental
+      role injection and (b) lets you swap in an input sanitiser later.
+    severity: WARNING
+    languages: [python]
+    metadata:
+      cwe: "CWE-77: Improper Neutralization of Special Elements used in a Command"
+      owasp: "LLM01:2026 Prompt Injection"
+      impact: HIGH
+    patterns:
+      - pattern-either:
+          - pattern: |
+              $LLM.invoke(f"...{$REQ.$F(...)}...")
+          - pattern: |
+              $LLM.invoke(f"...{$REQ.$F}...")
+          - pattern: |
+              $LLM($SYSTEM + $REQ.$F(...))
+      - metavariable-regex:
+          metavariable: $REQ
+          regex: "^(request|req|event|body|payload)$"
+
+  - id: ai.prompt-injection.vercel-ai-sdk-template-literal
+    message: >-
+      A Vercel AI SDK prompt is built from a template literal that
+      interpolates request-scoped data. Use the `messages` array with
+      role-separated content blocks, and pass untrusted input as a
+      user-role message wrapped in a delimiter the model is instructed
+      to treat as data only.
+    severity: WARNING
+    languages: [typescript, javascript]
+    metadata:
+      cwe: "CWE-77: Improper Neutralization of Special Elements used in a Command"
+      owasp: "LLM01:2026 Prompt Injection"
+      impact: HIGH
+    pattern-either:
+      - pattern: |
+          generateText({ ..., prompt: `...${$REQ.$F}...`, ... })
+      - pattern: |
+          streamText({ ..., prompt: `...${$REQ.$F}...`, ... })
+      - patterns:
+          - pattern: |
+              generateText({ ..., prompt: $A + $B, ... })
+          - metavariable-regex:
+              metavariable: $B
+              regex: "^(req\\.|request\\.|body\\.|event\\.|searchParams\\.).*"
