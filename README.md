@@ -26,13 +26,13 @@ Rules are designed to be **diff-friendly** — they prefer high-confidence match
 ## Use it
 
 ```bash
-semgrep --config https://raw.githubusercontent.com/foundationmachines/semgrep-ai-security/main/ai-security.yml ./
+semgrep --config https://raw.githubusercontent.com/andesyte-oss/semgrep-ai-security/main/ai-security.yml ./
 ```
 
 Or pin to a specific commit for stability:
 
 ```bash
-semgrep --config https://raw.githubusercontent.com/foundationmachines/semgrep-ai-security/<sha>/ai-security.yml ./
+semgrep --config https://raw.githubusercontent.com/andesyte-oss/semgrep-ai-security/<sha>/ai-security.yml ./
 ```
 
 Inside [Sebastion AI](https://foundationmachines.ai), this ruleset is enabled automatically. Disable it per repo with:
