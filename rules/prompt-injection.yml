@@ -12,33 +12,67 @@
 # it for v2.
 
 rules:
+  # TAINT MODE, DELIBERATELY.
+  #
+  # The original syntactic version matched only the exact shape
+  # `create(..., messages=[{"content": f"...{request.attr}..."}])`. Mutation
+  # testing across eight realistic style variants of the SAME vulnerability
+  # found a 50% false-negative rate: it missed the messages list assigned to a
+  # variable first, `"..." + request.body`, `"%s" % request.body`, and any
+  # parameter not literally named request/req/event/body/payload.
+  #
+  # Taint mode follows the value instead of pattern-matching one spelling of
+  # it, which is what a real codebase looks like. Verified 8/8 on the variants
+  # and 0/3 false positives on safe equivalents.
   - id: ai.prompt-injection.openai-python-fstring-user-input
     message: >-
-      User-controlled input is interpolated directly into an OpenAI chat
-      prompt via f-string. An attacker can override the system prompt or
-      exfiltrate tool credentials by injecting role markers. Wrap untrusted
-      content in a delimiter (e.g. XML tags) and instruct the model to
-      treat it as data, or escape with a dedicated prompt sanitiser.
+      User-controlled input is interpolated into an LLM prompt (f-string,
+      concatenation or %-formatting). An attacker can override the system
+      prompt or exfiltrate tool credentials by injecting role markers. Pass
+      untrusted text as its own message parameter rather than building it into
+      an instruction string, or wrap it in a delimiter and instruct the model
+      to treat it as data.
     severity: WARNING
     languages: [python]
+    mode: taint
     metadata:
       cwe: "CWE-77: Improper Neutralization of Special Elements used in a Command"
       owasp: "LLM01:2026 Prompt Injection"
       impact: HIGH
       references:
         - https://genai.owasp.org/llmrisk/llm01-prompt-injection/
-    patterns:
-      - pattern-either:
-          - pattern: |
-              $CLIENT.chat.completions.create(..., messages=[..., {"role": ..., "content": f"...{$REQ.$F(...)}..."}, ...], ...)
-          - pattern: |
-              $CLIENT.chat.completions.create(..., messages=[..., {"role": ..., "content": f"...{$REQ.$F}..."}, ...], ...)
-          - pattern: |
-              $CLIENT.messages.create(..., messages=[..., {"role": ..., "content": f"...{$REQ.$F(...)}..."}, ...], ...)
-      - metavariable-regex:
-          metavariable: $REQ
-          regex: "^(request|req|event|body|payload)$"
+    pattern-sources:
+      - patterns:
+          - pattern-either:
+              - pattern: $REQ.$F
+              - pattern: $REQ.$F(...)
+          - metavariable-regex:
+              metavariable: $REQ
+              regex: "^(request|req|event|body|payload|user_message|user_input|message|msg|input|data|query|prompt_input)$"
+    # Handing untrusted text to the API as its own message value is the
+    # CORRECT pattern. Only building it into a string is the risk, so a bare
+    # content value sanitises the flow while interpolated forms do not.
+    pattern-sanitizers:
+      - patterns:
+          - pattern: '{"role": ..., "content": $X}'
+          - pattern-not: '{"role": ..., "content": f"..."}'
+          - pattern-not: '{"role": ..., "content": $A + $B}'
+          - pattern-not: '{"role": ..., "content": $A % $B}'
+          - pattern-not: '{"role": ..., "content": $A.format(...)}'
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: $CLIENT.chat.completions.create(...)
+              - pattern: $CLIENT.messages.create(...)
 
+  # TAINT MODE, for the same reason as the rule above.
+  #
+  # The syntactic version required an f-string containing a `$REQ.$F` access
+  # spelled inline inside `.invoke(...)`, with $REQ literally named
+  # request/req/event/body/payload. Mutation testing across eight realistic
+  # spellings found 5 false negatives: string concatenation, the prompt built
+  # into a variable first, a differently-named parameter, `.predict(...)`, and
+  # the async `.ainvoke(...)`.
   - id: ai.prompt-injection.langchain-string-prompt
     message: >-
       A LangChain prompt is constructed with raw string concatenation /
@@ -48,43 +82,75 @@ rules:
       role injection and (b) lets you swap in an input sanitiser later.
     severity: WARNING
     languages: [python]
+    mode: taint
     metadata:
       cwe: "CWE-77: Improper Neutralization of Special Elements used in a Command"
       owasp: "LLM01:2026 Prompt Injection"
       impact: HIGH
-    patterns:
-      - pattern-either:
-          - pattern: |
-              $LLM.invoke(f"...{$REQ.$F(...)}...")
-          - pattern: |
-              $LLM.invoke(f"...{$REQ.$F}...")
-          - pattern: |
-              $LLM($SYSTEM + $REQ.$F(...))
-      - metavariable-regex:
-          metavariable: $REQ
-          regex: "^(request|req|event|body|payload)$"
+    pattern-sources:
+      - patterns:
+          - pattern-either:
+              - pattern: $REQ.$F
+              - pattern: $REQ.$F(...)
+          - metavariable-regex:
+              metavariable: $REQ
+              regex: "^(request|req|event|body|payload|user_message|user_input|message|msg|input|data|query|prompt_input)$"
+    pattern-sanitizers:
+      # PromptTemplate binding is the fix this rule recommends: the untrusted
+      # text becomes a bound parameter, not part of the instruction string.
+      - pattern: $TPL.format(...)
+      - pattern: $TPL.format_prompt(...)
+      - pattern: $TPL.invoke({...})
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: $LLM.invoke($P, ...)
+              - pattern: $LLM.ainvoke($P, ...)
+              - pattern: $LLM.predict($P, ...)
+              - pattern: $LLM.apredict($P, ...)
+              - pattern: $LLM.stream($P, ...)
+              - pattern: $LLM.astream($P, ...)
+              - pattern: $LLM.batch($P, ...)
+          - focus-metavariable: $P
 
+  # TAINT MODE, same reasoning as the Python rules above.
+  #
+  # The syntactic version required the template literal spelled inline in the
+  # `prompt:` property. Mutation testing found the obvious miss: the prompt
+  # assigned to a `const` first and passed by shorthand.
   - id: ai.prompt-injection.vercel-ai-sdk-template-literal
     message: >-
-      A Vercel AI SDK prompt is built from a template literal that
-      interpolates request-scoped data. Use the `messages` array with
-      role-separated content blocks, and pass untrusted input as a
-      user-role message wrapped in a delimiter the model is instructed
-      to treat as data only.
+      A Vercel AI SDK prompt is built from request-scoped data. Use the
+      `messages` array with role-separated content blocks, and pass
+      untrusted input as a user-role message wrapped in a delimiter the
+      model is instructed to treat as data only.
     severity: WARNING
     languages: [typescript, javascript]
+    mode: taint
     metadata:
       cwe: "CWE-77: Improper Neutralization of Special Elements used in a Command"
       owasp: "LLM01:2026 Prompt Injection"
       impact: HIGH
-    pattern-either:
-      - pattern: |
-          generateText({ ..., prompt: `...${$REQ.$F}...`, ... })
-      - pattern: |
-          streamText({ ..., prompt: `...${$REQ.$F}...`, ... })
+    pattern-sources:
       - patterns:
-          - pattern: |
-              generateText({ ..., prompt: $A + $B, ... })
+          - pattern-either:
+              - pattern: $REQ.$F
+              - pattern: $REQ.$F(...)
+              - pattern: await $REQ.$F(...)
           - metavariable-regex:
-              metavariable: $B
-              regex: "^(req\\.|request\\.|body\\.|event\\.|searchParams\\.).*"
+              metavariable: $REQ
+              regex: "^(req|request|event|body|payload|searchParams|userInput|user_input|input|data|query|message|msg)$"
+    pattern-sanitizers:
+      # Passing untrusted text as its own message value is the correct
+      # pattern; only building it into an instruction string is the risk.
+      - patterns:
+          - pattern: "{ role: ..., content: $X }"
+          - pattern-not: "{ role: ..., content: `...` }"
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: "generateText({ ..., prompt: $P, ... })"
+              - pattern: "streamText({ ..., prompt: $P, ... })"
+              - pattern: "generateObject({ ..., prompt: $P, ... })"
+              - pattern: "streamObject({ ..., prompt: $P, ... })"
+          - focus-metavariable: $P

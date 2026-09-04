@@ -55,7 +55,34 @@ rules:
       - pattern-either:
           - pattern: AgentExecutor(...)
           - pattern: AgentExecutor.from_agent_and_tools(...)
+          # `import langchain.agents as la` -> `la.AgentExecutor(...)`.
+          - pattern: $MOD.AgentExecutor(...)
+          - pattern: $MOD.AgentExecutor.from_agent_and_tools(...)
+          # `from langchain.agents import AgentExecutor as AE` -> `AE(...)`.
+          # The alias is only meaningful next to the import that created it,
+          # so the import is matched as part of the pattern rather than
+          # trusting a bare identifier.
+          - pattern: |
+              from langchain.agents import AgentExecutor as $AE
+              ...
+              $AE(...)
+          - pattern: |
+              from langchain.agents import AgentExecutor as $AE
+              ...
+              $AE.from_agent_and_tools(...)
       - pattern-not: |
           AgentExecutor(..., max_iterations=..., ...)
       - pattern-not: |
           AgentExecutor.from_agent_and_tools(..., max_iterations=..., ...)
+      - pattern-not: |
+          $MOD.AgentExecutor(..., max_iterations=..., ...)
+      - pattern-not: |
+          $MOD.AgentExecutor.from_agent_and_tools(..., max_iterations=..., ...)
+      - pattern-not: |
+          from langchain.agents import AgentExecutor as $AE
+          ...
+          $AE(..., max_iterations=..., ...)
+      - pattern-not: |
+          from langchain.agents import AgentExecutor as $AE
+          ...
+          $AE.from_agent_and_tools(..., max_iterations=..., ...)

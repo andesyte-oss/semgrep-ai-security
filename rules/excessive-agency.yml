@@ -6,6 +6,17 @@
 # common patterns.
 
 rules:
+  # GENERALISED DECORATOR + OPERATION MATCHING.
+  #
+  # The original version hardcoded `@tool` (bare) and three destructive call
+  # shapes. Mutation testing across seven realistic spellings found four
+  # false negatives: `@tool("name", return_direct=True)`, the OpenAI Agents
+  # SDK's `@function_tool`, `conn.execute("DELETE FROM ...")` (the string
+  # ellipsis never matched a partial literal), and `os.remove(...)`.
+  #
+  # The decorator is now matched by name shape (bare, called, or
+  # module-qualified) and the destructive operation by a verb allowlist, so
+  # the rule follows the *category* of call rather than one spelling.
   - id: ai.excessive-agency.tool-deletes-without-confirmation-py
     message: >-
       LLM-callable tool performs a delete / destroy operation with no
@@ -22,27 +33,99 @@ rules:
       impact: HIGH
     patterns:
       - pattern-either:
-          - pattern: |
-              @tool
-              def $NAME(...):
-                  ...
-                  $X.delete(...)
-                  ...
-          - pattern: |
-              @tool
-              def $NAME(...):
-                  ...
-                  $X.drop_table(...)
-                  ...
-          - pattern: |
-              @tool
-              def $NAME(...):
-                  ...
-                  $X.execute("DELETE FROM ...")
-                  ...
+          # Destructive method / function call by verb.
+          - patterns:
+              - pattern-either:
+                  - pattern: |
+                      @$DEC
+                      def $NAME(...):
+                          ...
+                          $X.$M(...)
+                          ...
+                  - pattern: |
+                      @$DEC(...)
+                      def $NAME(...):
+                          ...
+                          $X.$M(...)
+                          ...
+                  - pattern: |
+                      @$DEC
+                      async def $NAME(...):
+                          ...
+                          $X.$M(...)
+                          ...
+                  - pattern: |
+                      @$DEC(...)
+                      async def $NAME(...):
+                          ...
+                          $X.$M(...)
+                          ...
+              - metavariable-regex:
+                  metavariable: $M
+                  regex: "^(delete|delete_one|delete_many|delete_object|delete_objects|destroy|drop|drop_table|drop_collection|remove|unlink|rmtree|purge|truncate|wipe)$"
+          # Destructive SQL executed through a generic cursor API.
+          - patterns:
+              - pattern-either:
+                  - pattern: |
+                      @$DEC
+                      def $NAME(...):
+                          ...
+                          $X.$M($Q, ...)
+                          ...
+                  - pattern: |
+                      @$DEC(...)
+                      def $NAME(...):
+                          ...
+                          $X.$M($Q, ...)
+                          ...
+                  - pattern: |
+                      @$DEC
+                      async def $NAME(...):
+                          ...
+                          $X.$M($Q, ...)
+                          ...
+                  - pattern: |
+                      @$DEC(...)
+                      async def $NAME(...):
+                          ...
+                          $X.$M($Q, ...)
+                          ...
+              - metavariable-regex:
+                  metavariable: $M
+                  regex: "^(execute|executemany|execute_query|exec_driver_sql|run)$"
+              - metavariable-regex:
+                  metavariable: $Q
+                  regex: '(?is)^[frbu]*[''"].*\b(delete\s+from|drop\s+table|truncate\s+table)\b.*$'
+      - metavariable-regex:
+          metavariable: $DEC
+          regex: "^([A-Za-z_][A-Za-z_0-9]*\\.)*(tool|function_tool|ai_function|agent_tool)$"
       - metavariable-regex:
           metavariable: $NAME
-          regex: "^(delete|destroy|drop|wipe|purge|remove)_.*"
+          regex: "^(delete|destroy|drop|wipe|purge|remove|truncate)_.*"
+      # A confirmation parameter the model must set is exactly the mitigation
+      # this rule asks for. Flagging a correctly-guarded tool teaches users
+      # that doing the right thing still trips the scanner.
+      - pattern-not: |
+          @$DEC
+          def $NAME(..., $CONFIRM, ...):
+              ...
+              if ...:
+                  raise ...
+              ...
+      - pattern-not: |
+          @$DEC(...)
+          def $NAME(..., $CONFIRM, ...):
+              ...
+              if ...:
+                  raise ...
+              ...
+      - pattern-not: |
+          @$DEC
+          async def $NAME(..., $CONFIRM, ...):
+              ...
+              if ...:
+                  raise ...
+              ...
 
   - id: ai.excessive-agency.tool-broad-shell-py
     message: >-
@@ -58,10 +141,26 @@ rules:
       owasp: "LLM08:2026 Excessive Agency"
       impact: HIGH
     patterns:
-      - pattern: |
-          @tool
-          def $NAME(...):
-              ...
+      - pattern-either:
+          - pattern: |
+              @$DEC
+              def $NAME(...):
+                  ...
+          - pattern: |
+              @$DEC(...)
+              def $NAME(...):
+                  ...
+          - pattern: |
+              @$DEC
+              async def $NAME(...):
+                  ...
+          - pattern: |
+              @$DEC(...)
+              async def $NAME(...):
+                  ...
+      - metavariable-regex:
+          metavariable: $DEC
+          regex: "^([A-Za-z_][A-Za-z_0-9]*\\.)*(tool|function_tool|ai_function|agent_tool)$"
       - metavariable-regex:
           metavariable: $NAME
-          regex: "^(execute_command|run_shell|run_bash|shell|bash|sh|run|exec)$"
+          regex: "^(execute_command|run_shell|run_bash|run_command|shell|bash|sh|run|exec|execute)$"

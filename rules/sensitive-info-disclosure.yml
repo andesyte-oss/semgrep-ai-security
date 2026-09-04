@@ -6,42 +6,100 @@
 # system prompt, where the secret leaks through observability.
 
 rules:
+  # TAINT MODE after mutation testing.
+  #
+  # The syntactic version required a double-quoted literal sitting *directly*
+  # in a `{"role": "system", ...}` dict. Eight realistic spellings of the same
+  # vulnerability showed three false negatives: single-quoted dicts (`{'role':
+  # 'system', ...}`), the `developer` role (OpenAI's o-series rename of
+  # `system`), and the common shape where the key lives in a module constant
+  # that is interpolated into the content string.
+  #
+  # Taint mode follows the secret literal to whichever prompt slot it reaches.
   - id: ai.sensitive-info.hardcoded-secret-in-system-prompt-py
     message: >-
-      What looks like a long random token / API key is embedded directly
-      in a system prompt string. Anything in the system prompt is
-      recoverable via prompt injection — never put secrets there. Inject
-      them via tool calls or fetch them server-side from the request
-      context.
+      What looks like a long random token / API key reaches a system prompt
+      string. Anything in the system prompt is recoverable via prompt
+      injection — never put secrets there. Inject them via tool calls or
+      fetch them server-side from the request context.
     severity: ERROR
     languages: [python]
+    mode: taint
     metadata:
       cwe: "CWE-798: Use of Hard-coded Credentials"
       owasp: "LLM06:2026 Sensitive Information Disclosure"
       impact: HIGH
-    patterns:
-      - pattern: |
-          {"role": "system", "content": $S}
-      - metavariable-regex:
-          metavariable: $S
-          regex: '(?s)"[^"]*(sk_live_|sk-[A-Za-z0-9]{20,}|ghp_[A-Za-z0-9]{30,}|AKIA[0-9A-Z]{16}|AIza[0-9A-Za-z\-_]{30,})[^"]*"'
+    pattern-sources:
+      - patterns:
+          - pattern: $S
+          - metavariable-regex:
+              metavariable: $S
+              # Vendor key shapes with enough entropy to be unambiguous. The
+              # length floors are what keep `"The sku is sk-123."` quiet.
+              regex: '(?s)^[frbu]*[''"].*(sk_live_|sk-[A-Za-z0-9]{20,}|ghp_[A-Za-z0-9]{30,}|AKIA[0-9A-Z]{16}|AIza[0-9A-Za-z\-_]{30,}).*[''"]$'
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              # `developer` is OpenAI's o-series rename of the system role and
+              # carries exactly the same disclosure risk.
+              - pattern: '{"role": "system", "content": $C}'
+              - pattern: "{'role': 'system', 'content': $C}"
+              - pattern: '{"role": "developer", "content": $C}'
+              - pattern: "{'role': 'developer', 'content': $C}"
+          - focus-metavariable: $C
 
+  # TAINT MODE after real-world testing.
+  #
+  # The original patterns were `logger.$LEVEL(..., $MSGS, ...)` and
+  # `print(f"...{$MSGS}...")`, which match ANY logging call and ANY f-string
+  # print. Scanned against real repositories (langserve, openai-python) they
+  # produced 33 findings, ALL false positives — `print(f"LANGSERVE: ...")`,
+  # `logger.error(error_message)`. Noise on that scale gets a scanner switched
+  # off, which is a security failure by a slower route.
+  #
+  # Now requires an actual LLM payload to reach a logging sink.
   - id: ai.sensitive-info.log-full-llm-request-py
     message: >-
-      The entire `messages=` payload is being logged. If the system
-      prompt contains anything secret (API keys, internal URLs, customer
-      identifiers), they're now in your log aggregator. Redact secrets
-      from the system prompt or scrub before logging.
+      An LLM request payload or response is being logged. If the system
+      prompt or conversation contains anything secret (API keys, internal
+      URLs, customer identifiers), it is now in your log aggregator.
+      Log an identifier or a redacted summary instead of the payload.
     severity: WARNING
     languages: [python]
+    mode: taint
     metadata:
       cwe: "CWE-532: Insertion of Sensitive Information into Log File"
       owasp: "LLM06:2026 Sensitive Information Disclosure"
       impact: MEDIUM
-    pattern-either:
-      - pattern: |
-          logging.$LEVEL(..., messages=$MSGS, ...)
-      - pattern: |
-          logger.$LEVEL(..., $MSGS, ...)
-      - pattern: |
-          print(f"...{$MSGS}...")
+    pattern-sources:
+      - pattern-either:
+          # The payload itself, however it was built.
+          - pattern: |
+              $MSGS = [{"role": ..., "content": ...}, ...]
+          - pattern: $CLIENT.chat.completions.create(...)
+          - pattern: $CLIENT.messages.create(...)
+    pattern-sanitizers:
+      # Aggregates and redactions carry no payload content. `len(messages)` is
+      # the canonical "log a size, not the data" fix and must not be flagged,
+      # otherwise the rule punishes the remediation it recommends.
+      - pattern-either:
+          - pattern: len(...)
+          - pattern: $X.count(...)
+          - pattern: redact(...)
+          - pattern: $X.redact(...)
+          - pattern: scrub(...)
+          - pattern: $X.scrub(...)
+    pattern-sinks:
+      # `print` is deliberately NOT a sink. Real-world testing showed the
+      # overwhelming majority of matches were CLI demos printing model output
+      # to a terminal — `print(completion.choices[0].message.content)` — which
+      # is the intended behaviour of that code, not a disclosure. Persistent
+      # log sinks are the actual risk: they ship payloads to an aggregator.
+      - pattern-either:
+          - pattern: logging.$LEVEL(...)
+          - pattern: logger.$LEVEL(...)
+          - pattern: $LOG.debug(...)
+          - pattern: $LOG.info(...)
+          - pattern: $LOG.warning(...)
+          - pattern: $LOG.error(...)
+          - pattern: $LOG.exception(...)

@@ -7,93 +7,216 @@
 # pipelines.
 
 rules:
+  # TAINT MODE after mutation testing.
+  #
+  # The syntactic version enumerated five exact shapes and missed 6 of 8
+  # realistic spellings of the same RCE: the response passed through two
+  # variables instead of one, `exec` reached via an intermediate variable,
+  # an Anthropic response bound to a variable first, `compile` as the sink,
+  # `self.client` inside a class, and `.strip()` called before eval.
+  #
+  # Taint mode follows the model output to whichever code-execution sink it
+  # reaches, however many hops away.
   - id: ai.insecure-output-handling.eval-llm-response-py
     message: >-
-      LLM response is passed to `eval` / `exec` / `compile`. This is
-      remote code execution by any reasonable threat model — the model
-      will happily emit attacker-controlled code if the input prompt is
+      LLM response reaches `eval` / `exec` / `compile`. This is remote
+      code execution by any reasonable threat model — the model will
+      happily emit attacker-controlled code if the input prompt is
       compromised. Use a sandboxed code interpreter or restrict to a
       structured-output schema (e.g. tool calls / JSON Schema).
     severity: ERROR
     languages: [python]
+    mode: taint
     metadata:
       cwe: "CWE-94: Improper Control of Generation of Code"
       owasp: "LLM02:2026 Insecure Output Handling"
       impact: HIGH
-    pattern-either:
-      - pattern: |
-          eval($CLIENT.chat.completions.create(...).choices[0].message.content)
-      - pattern: |
-          exec($CLIENT.chat.completions.create(...).choices[0].message.content)
-      - pattern: |
-          eval($CLIENT.messages.create(...).content[0].text)
-      - pattern: |
-          $RESP = $CLIENT.chat.completions.create(...)
-          ...
-          eval($RESP.choices[0].message.content)
-      - pattern: |
-          $RESP = $CLIENT.chat.completions.create(...)
-          ...
-          exec($RESP.choices[0].message.content)
+    pattern-sources:
+      - pattern-either:
+          - pattern: $X.choices[0].message.content
+          - pattern: $X.choices[0].delta.content
+          - pattern: $X.content[0].text
+          - pattern: $CLIENT.chat.completions.create(...)
+          - pattern: $CLIENT.messages.create(...)
+    pattern-sanitizers:
+      # Structured parsing is the recommended fix: `json.loads` raises on
+      # anything that is not data, so it cannot carry code through to a sink.
+      # `ast.literal_eval` likewise evaluates literals only.
+      - pattern: json.loads(...)
+      - pattern: ast.literal_eval(...)
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: eval($CODE, ...)
+              - pattern: exec($CODE, ...)
+              - pattern: compile($CODE, ...)
+          - focus-metavariable: $CODE
 
+  # TAINT MODE after mutation testing.
+  #
+  # The syntactic version matched two exact assignment shapes and missed 4 of
+  # 7 realistic spellings: the html held in a variable first, a Vercel AI SDK
+  # `generateText().text` result, `outerHTML`, and `insertAdjacentHTML` — all
+  # the same XSS with the same consequence.
   - id: ai.insecure-output-handling.innerhtml-llm-response-ts
     message: >-
-      LLM-generated text is assigned directly to `innerHTML` /
-      `dangerouslySetInnerHTML`. Even if your prompt instructs the model
-      to return plain text, an attacker can manipulate the response via
-      prompt injection. Render via `textContent` / a JSX text child, or
-      sanitise with DOMPurify before injection.
+      LLM-generated text reaches `innerHTML` / `outerHTML` /
+      `insertAdjacentHTML` / `dangerouslySetInnerHTML`. Even if your prompt
+      instructs the model to return plain text, an attacker can manipulate
+      the response via prompt injection. Render via `textContent` / a JSX
+      text child, or sanitise with DOMPurify before injection.
     severity: ERROR
     languages: [typescript, javascript]
+    mode: taint
     metadata:
       cwe: "CWE-79: Cross-site Scripting"
       owasp: "LLM02:2026 Insecure Output Handling"
       impact: HIGH
-    pattern-either:
-      - pattern: $EL.innerHTML = $TEXT.choices[0].message.content
-      - pattern: $EL.innerHTML = $TEXT.content[0].text
+    pattern-sources:
+      - pattern-either:
+          - pattern: $X.choices[0].message.content
+          - pattern: $X.choices[0].delta.content
+          - pattern: $X.content[0].text
+          - pattern: generateText(...)
+          - pattern: streamText(...)
+    pattern-sanitizers:
+      # An HTML sanitiser is the documented fix; flagging sanitised output
+      # would teach users that doing the right thing still trips the scanner.
+      - pattern: DOMPurify.sanitize(...)
+      - pattern: $D.sanitize(...)
+      - pattern: sanitizeHtml(...)
+    pattern-sinks:
       - patterns:
-          - pattern: |
-              <$TAG dangerouslySetInnerHTML={{ __html: $EXPR }} />
-          - metavariable-pattern:
-              metavariable: $EXPR
-              patterns:
-                - pattern-either:
-                    - pattern: $X.completions.create(...).choices[0].message.content
-                    - pattern: $X.messages.create(...).content[0].text
-                    - pattern: generateText(...).text
-                    - pattern: $X.text
-                    - pattern: $X.message.content
+          - pattern-either:
+              - pattern: $EL.innerHTML = $HTML
+              - pattern: $EL.outerHTML = $HTML
+              - pattern: $EL.insertAdjacentHTML($POS, $HTML)
+              - pattern: |
+                  <$TAG dangerouslySetInnerHTML={{ __html: $HTML }} />
+          - focus-metavariable: $HTML
 
-  - id: ai.insecure-output-handling.shell-exec-llm-response
+  # SPLIT BY LANGUAGE, DELIBERATELY.
+  #
+  # This rule previously declared `languages: [python, typescript, javascript]`
+  # with Python-only patterns (`subprocess.run`, `os.system`). Semgrep must
+  # parse every pattern in EVERY declared language; `subprocess.run(...)` is not
+  # valid JavaScript, so the whole rule was silently dropped — no error, no
+  # warning, zero findings. Verified: identical patterns matched under
+  # [python] and [python, typescript] but NOT under [python, typescript,
+  # javascript].
+  #
+  # Keep language sets narrow and matched to the syntax they contain.
+  - id: ai.insecure-output-handling.shell-exec-llm-response-py
     message: >-
       LLM response is passed to a shell-exec primitive
-      (`subprocess.run(..., shell=True)`, `os.system`, `child_process.exec`).
+      (`subprocess.run(..., shell=True)`, `os.system`).
       A successful prompt-injection here is full remote shell access on
       whatever host runs this code. Replace with an exec form that takes
       an argv array, or refuse non-allowlisted commands.
     severity: ERROR
-    languages: [python, typescript, javascript]
+    languages: [python]
+    mode: taint
     metadata:
       cwe: "CWE-78: OS Command Injection"
       owasp: "LLM02:2026 Insecure Output Handling"
       impact: HIGH
-    pattern-either:
-      - pattern: |
-          subprocess.run($CMD, shell=True, ...)
-      - pattern: |
-          os.system($CMD)
-      - pattern: |
-          exec($CMD)
+    pattern-sources:
+      - pattern-either:
+          - pattern: $X.choices[0].message.content
+          - pattern: $X.choices[0].delta.content
+          - pattern: $X.content[0].text
+          - pattern: $CLIENT.chat.completions.create(...)
+          - pattern: $CLIENT.messages.create(...)
+    pattern-sanitizers:
+      # An argv ARRAY is the correct, safe form: no shell is involved, so
+      # model output cannot inject a command. Flagging it teaches users that
+      # doing the right thing still trips the scanner.
+      - pattern: subprocess.run([...], ...)
+      - pattern: subprocess.call([...], ...)
+      - pattern: subprocess.Popen([...], ...)
+      - pattern: subprocess.check_output([...], ...)
+    pattern-sinks:
       - patterns:
           - pattern-either:
-              - pattern: subprocess.run($CMD, ...)
-              - pattern: child_process.exec($CMD, ...)
-              - pattern: exec($CMD)
-          - metavariable-pattern:
-              metavariable: $CMD
-              patterns:
-                - pattern-either:
-                    - pattern: $X.choices[0].message.content
-                    - pattern: $X.content[0].text
-                    - pattern: $X.message.content
+              - pattern: subprocess.run($CMD, shell=True, ...)
+              - pattern: subprocess.call($CMD, shell=True, ...)
+              - pattern: subprocess.Popen($CMD, shell=True, ...)
+              - pattern: subprocess.check_output($CMD, shell=True, ...)
+              - pattern: os.system($CMD)
+              - pattern: os.popen($CMD)
+
+  # Unconditional companion to the taint rule above.
+  #
+  # Taint requires a visible LLM source in the SAME file. In agent codebases
+  # the command frequently arrives as a plain function parameter from another
+  # module, where taint sees nothing. `shell=True` on a caller-supplied string
+  # is dangerous regardless of provenance, so this rule stands on the sink
+  # alone and deliberately does not try to prove the value came from a model.
+  - id: ai.insecure-output-handling.shell-true-untrusted-py
+    message: >-
+      A shell command is built from a non-literal value with `shell=True`
+      (or passed to `os.system`/`os.popen`). If that value can be influenced
+      by model output or user input — directly or several calls away — this is
+      remote command execution. Use an argv array with `shell=False`, or
+      allowlist the command.
+    severity: WARNING
+    languages: [python]
+    metadata:
+      cwe: "CWE-78: OS Command Injection"
+      owasp: "LLM02:2026 Insecure Output Handling"
+      impact: HIGH
+    patterns:
+      - pattern-either:
+          - pattern: subprocess.run($CMD, shell=True, ...)
+          - pattern: subprocess.call($CMD, shell=True, ...)
+          - pattern: subprocess.Popen($CMD, shell=True, ...)
+          - pattern: subprocess.check_output($CMD, shell=True, ...)
+          - pattern: os.system($CMD)
+          - pattern: os.popen($CMD)
+      # A hardcoded string literal is the developer's own command, not input.
+      - pattern-not: subprocess.run("...", shell=True, ...)
+      - pattern-not: subprocess.call("...", shell=True, ...)
+      - pattern-not: subprocess.Popen("...", shell=True, ...)
+      - pattern-not: subprocess.check_output("...", shell=True, ...)
+      - pattern-not: os.system("...")
+      - pattern-not: os.popen("...")
+
+  # TAINT MODE after mutation testing.
+  #
+  # The syntactic version matched `child_process.exec` and bare `exec`/
+  # `execSync` with an inline response expression, missing 3 of 7 realistic
+  # spellings: an aliased namespace import (`import * as cp`), the command
+  # held in a variable first, and `spawn(cmd, { shell: true })`.
+  - id: ai.insecure-output-handling.shell-exec-llm-response-js
+    message: >-
+      LLM response reaches a shell-exec primitive (`child_process.exec`,
+      `execSync`, or `spawn` with `shell: true`). A successful
+      prompt-injection here is full remote shell access on whatever host
+      runs this code. Use `execFile` with an argv array, or refuse
+      non-allowlisted commands.
+    severity: ERROR
+    languages: [typescript, javascript]
+    mode: taint
+    metadata:
+      cwe: "CWE-78: OS Command Injection"
+      owasp: "LLM02:2026 Insecure Output Handling"
+      impact: HIGH
+    pattern-sources:
+      - pattern-either:
+          - pattern: $X.choices[0].message.content
+          - pattern: $X.choices[0].delta.content
+          - pattern: $X.content[0].text
+          - pattern: generateText(...)
+          - pattern: streamText(...)
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: $CP.exec($CMD, ...)
+              - pattern: $CP.execSync($CMD, ...)
+              - pattern: exec($CMD, ...)
+              - pattern: execSync($CMD, ...)
+              - pattern: "$CP.spawn($CMD, { ..., shell: true, ... })"
+              - pattern: "spawn($CMD, { ..., shell: true, ... })"
+              - pattern: "$CP.spawnSync($CMD, { ..., shell: true, ... })"
+              - pattern: "spawnSync($CMD, { ..., shell: true, ... })"
+          - focus-metavariable: $CMD

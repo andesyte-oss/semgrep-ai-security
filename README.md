@@ -1,12 +1,17 @@
-# semgrep-ai-security
+# Andesyte AI security rules
 
-> Open Semgrep ruleset for LLM and AI-application security. Maintained by Foundation Machines for [Sebastion AI](https://foundationmachines.ai) and freely usable in your own Semgrep pipeline.
+Open Semgrep rules for LLM and AI-application security, maintained by
+[Andesyte](https://andesyte.com) and available for any Semgrep pipeline.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-The OWASP LLM Top 10 (2026) and the AI Incident Database keep growing, but the Semgrep ecosystem has *no* widely-adopted free ruleset that covers AI-app-specific bugs: prompt-injection sinks, unsanitised tool-calls, RAG-poisoning vectors, secret leakage in system prompts, agent-loop bombs. This repo fills that gap.
+The rules target code shapes specific to AI applications: untrusted input
+entering prompts, model output reaching execution sinks, missing resource caps,
+sensitive prompt logging, and tools with excessive authority.
 
-Rules are designed to be **diff-friendly** — they prefer high-confidence matches over recall — so they're safe to run as an inline PR reviewer on real codebases.
+Rules favour high-confidence findings over broad but noisy matching. The
+published Andesyte CLI runs a mutation corpus and real-project false-positive
+budgets before release.
 
 ## Coverage
 
@@ -35,32 +40,37 @@ Or pin to a specific commit for stability:
 semgrep --config https://raw.githubusercontent.com/andesyte-oss/semgrep-ai-security/<sha>/ai-security.yml ./
 ```
 
-Inside [Sebastion AI](https://foundationmachines.ai), this ruleset is enabled automatically. Disable it per repo with:
-
-```yaml
-# .sebastion.yml
-disable_scanners:
-  - semgrep
-```
+The rules are also packaged for local, pinned use by
+[`@andesyte-oss/cli`](https://www.npmjs.com/package/@andesyte-oss/cli). That
+package never uses `--config auto` or downloads rules while scanning.
 
 ## Design principles
 
-1. **High precision over recall.** Every rule is gated on observable code shape, not heuristics. We'd rather miss a finding than ship a false positive that gets the bot muted.
-2. **No taint mode** in v1. Semgrep OSS taint mode has too many false positives on Python/TS LLM frameworks. We may add v2 rules using deep-semgrep once it stabilises.
-3. **Language coverage**: Python first (langchain / llamaindex / openai / anthropic / litellm). TypeScript second (Vercel AI SDK, OpenAI Node, Anthropic Node, AI SDK Core). Adding more on demand.
-4. **CWE-tagged**: every rule maps to a CWE in `metadata.cwe` so findings render with a proper CWE link in PR comments.
+1. **High precision over recall.** Rules match observable code and data flow,
+   not broad keyword heuristics.
+2. **Taint mode where data flow matters.** Prompt-injection and insecure-output
+   rules follow untrusted data to concrete sinks, with explicit sanitizers for
+   safe message parameters, argv arrays, validation, and confirmation guards.
+3. **Honest language coverage.** Python is deepest. TypeScript and JavaScript
+   cover narrower framework-specific paths. Other languages are not claimed.
+4. **CWE metadata.** Every rule maps findings to a CWE.
 
 ## Contributing
 
-PRs welcome. Each rule must include:
+PRs should include:
 
-- A `severity` (`ERROR` / `WARNING` / `INFO` mapped to our impact metadata)
-- `metadata.cwe` (e.g. `CWE-77: Command Injection`)
+- A `severity` (`ERROR`, `WARNING`, or `INFO`, mapped to impact metadata)
+- `metadata.cwe`
 - `metadata.impact: HIGH|MEDIUM|LOW`
-- A minimal positive and negative test case in `tests/<rule-id>/`
+- A vulnerable variant and a safe counterexample for the downstream mutation
+  corpus before the rule is packaged in `@andesyte-oss/security-rules`
 
-Run tests with `semgrep --test`.
+Run syntax validation with:
+
+```bash
+semgrep --validate --config rules
+```
 
 ## License
 
-MIT © Foundation Machines Ltd. See [LICENSE](./LICENSE).
+MIT © Andesyte. See [LICENSE](./LICENSE).
